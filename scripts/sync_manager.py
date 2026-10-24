@@ -297,14 +297,21 @@ def heal_workspace_uris(db_path: Path):
 
                 unquoted = urllib.parse.unquote(u[7:])
 
-                # Detect Windows paths on Unix or Unix paths on Windows
-                is_win_on_unix = (SYSTEM_OS != "Windows" and len(unquoted) >= 3 and unquoted[0] == "/" and unquoted[2] == ":")
-                is_unix_on_win = (SYSTEM_OS == "Windows" and unquoted.startswith("/"))
+                # Detect cross-OS format differences (Windows drive letters vs Unix paths)
+                is_win_format = (len(unquoted) >= 3 and unquoted[0] == "/" and unquoted[2] == ":") or (len(unquoted) >= 2 and unquoted[1] == ":") or (":\\" in unquoted)
+                is_unix_format = unquoted.startswith("/") and not (len(unquoted) >= 3 and unquoted[2] == ":")
 
-                local_path_str = unquoted[1:] if is_win_on_unix else unquoted
+                is_foreign = (SYSTEM_OS != "Windows" and is_win_format) or (SYSTEM_OS == "Windows" and is_unix_format)
+
+                if is_win_format and unquoted.startswith("/"):
+                    local_path_str = unquoted[1:]
+                else:
+                    local_path_str = unquoted
+
                 path_obj = Path(local_path_str)
 
-                if not is_win_on_unix and not is_unix_on_win and path_obj.exists():
+                # If path exists locally on this machine, keep it as-is
+                if not is_foreign and path_obj.exists():
                     new_uris.append(u)
                     continue
 

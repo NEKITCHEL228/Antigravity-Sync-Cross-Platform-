@@ -14,6 +14,7 @@ import fnmatch
 import platform
 import subprocess
 import sqlite3
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -253,6 +254,96 @@ def merge_summaries_db(src_db: Path, local_db: Path):
         print(f"[Warn] Ошибка объединения conversation_summaries.db: {e}")
 
 
+def heal_workspace_uris(db_path: Path):
+    """
+    Fixes foreign/missing OS paths in conversation_summaries.db across macOS, Windows, and Linux.
+    Prevents 'Missing folder' / 'Пропавшая папка' warnings when opening chats synced from another OS.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return
+
+    home = Path.home()
+    developer_dir = home / "Developer"
+    scratch_dir = GEMINI_ANTIGRAVITY / "scratch"
+    developer_dir.mkdir(parents=True, exist_ok=True)
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    projects_data = load_projects()
+    tracked_projects = {p["name"].lower(): Path(p["path"]) for p in projects_data.get("projects", [])}
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        c = conn.cursor()
+        c.execute("SELECT conversation_id, workspace_uris FROM conversation_summaries;")
+        rows = c.fetchall()
+
+        updates = []
+        for cid, uris_raw in rows:
+            if not uris_raw:
+                continue
+            try:
+                uris = json.loads(uris_raw)
+            except Exception:
+                continue
+
+            new_uris = []
+            changed = False
+
+            for u in uris:
+                if not u.startswith("file://"):
+                    new_uris.append(u)
+                    continue
+
+                unquoted = urllib.parse.unquote(u[7:])
+
+                # Detect Windows paths on Unix or Unix paths on Windows
+                is_win_on_unix = (SYSTEM_OS != "Windows" and len(unquoted) >= 3 and unquoted[0] == "/" and unquoted[2] == ":")
+                is_unix_on_win = (SYSTEM_OS == "Windows" and unquoted.startswith("/"))
+
+                local_path_str = unquoted[1:] if is_win_on_unix else unquoted
+                path_obj = Path(local_path_str)
+
+                if not is_win_on_unix and not is_unix_on_win and path_obj.exists():
+                    new_uris.append(u)
+                    continue
+
+                changed = True
+                base_name = path_obj.name or "workspace"
+
+                matched_target = None
+                for proj_name, proj_path in tracked_projects.items():
+                    if (proj_name in base_name.lower() or
+                        base_name.lower() in proj_name or
+                        "дизайн" in base_name.lower() and "design" in proj_name):
+                        matched_target = proj_path
+                        break
+
+                if matched_target and matched_target.exists():
+                    new_uris.append(matched_target.as_uri())
+                elif "antigravity" in str(path_obj).lower():
+                    local_target = scratch_dir / base_name
+                    local_target.mkdir(parents=True, exist_ok=True)
+                    new_uris.append(local_target.as_uri())
+                else:
+                    local_target = developer_dir / base_name
+                    local_target.mkdir(parents=True, exist_ok=True)
+                    new_uris.append(local_target.as_uri())
+
+            if changed:
+                updates.append((json.dumps(new_uris), cid))
+
+        for new_val, cid in updates:
+            c.execute("UPDATE conversation_summaries SET workspace_uris = ? WHERE conversation_id = ?;", (new_val, cid))
+
+        conn.commit()
+        conn.close()
+        if updates:
+            print(f"[Antigravity Sync] Исправлены пути к рабочим папкам для {len(updates)} диалогов.")
+    except Exception as e:
+        print(f"[Warn] Ошибка адаптации путей рабочих папок: {e}")
+
+
 # ----------------------------------------------------
 # Pure-Python Cross-Platform File Synchronizer
 # ----------------------------------------------------
@@ -354,6 +445,7 @@ def copy_all_to_target(target_dir: Path):
     summary_db = GEMINI_ANTIGRAVITY / "conversation_summaries.db"
     if summary_db.exists():
         backup_sqlite_db(summary_db, target_dir / "data" / "conversation_summaries.db")
+        heal_workspace_uris(target_dir / "data" / "conversation_summaries.db")
 
     proto_file = GEMINI_ANTIGRAVITY / "agyhub_summaries_proto.pb"
     if proto_file.exists():
@@ -434,6 +526,7 @@ def restore_all_from_target(target_dir: Path):
     if remote_summaries.exists():
         GEMINI_ANTIGRAVITY.mkdir(parents=True, exist_ok=True)
         merge_summaries_db(remote_summaries, GEMINI_ANTIGRAVITY / "conversation_summaries.db")
+        heal_workspace_uris(GEMINI_ANTIGRAVITY / "conversation_summaries.db")
         print("[Antigravity Sync] Сводки и история диалогов (summaries) успешно объединены.")
 
     remote_proto = target_dir / "data" / "agyhub_summaries_proto.pb"
@@ -869,6 +962,9 @@ def main():
         git_init(sys.argv[2])
     elif cmd in ("status", "st"):
         git_status()
+    elif cmd in ("heal", "fix-paths"):
+        heal_workspace_uris(GEMINI_ANTIGRAVITY / "conversation_summaries.db")
+        print("[Antigravity Sync] Пути ко всем рабочим папкам проверены и исправлены.")
     elif cmd == "push":
         msg = sys.argv[2] if len(sys.argv) > 2 else None
         git_push(msg)

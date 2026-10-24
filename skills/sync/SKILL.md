@@ -30,17 +30,33 @@ When pulled on another device, the user can open any past conversation from the 
 
 ---
 
-### 2. Adding & Managing Projects in Sync
-The user can add arbitrary projects to the synchronization pool via chat.
+### 2. Adding & Managing Projects in Sync (Custom Per-Project Folders)
+The user can add arbitrary projects to the synchronization pool and choose individual target folders for each project.
 
-- **Add Project**:
+- **Add Project** (with optional custom destination folder):
   ```bash
-  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add "<path_to_project>" "[optional_name]"
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add "<path_to_project>" "[optional_name]" "[optional_target_folder]"
   ```
   *Security & Optimization:*
   - System directories (`/etc`, `/System`, `C:\Windows`, user home root) are strictly prohibited.
   - Secrets and environment files (`.env*`, `id_rsa*`, `*.pem`, `*.key`, tokens) are automatically excluded.
   - Heavy caches (`node_modules`, `venv`, `.git`, `dist`, `build`) are excluded.
+
+- **Choose / Change Project Folder Locally**:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-path "<project_name>" "<new_path>"
+  ```
+  Safely updates the local path binding, transfers existing files if new folder is empty, and automatically heals conversation history links (`conversation_summaries.db`).
+
+- **Set OS-Specific Target Path**:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-target "<project_name>" "<windows|mac|linux|default>" "<target_path>"
+  ```
+
+- **Set Global Default Folder for Projects**:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project default-dir "[new_default_directory]"
+  ```
 
 - **List Synced Projects**:
   ```bash

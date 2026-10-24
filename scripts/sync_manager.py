@@ -114,12 +114,22 @@ def load_config() -> dict:
     return {
         "git_sync_dir": str(DEFAULT_GIT_SYNC_DIR),
         "gdrive_path": "",
-        "sync_conversations": True
+        "sync_conversations": True,
+        "default_projects_dir": str(HOME / "Developer")
     }
 
 
 def save_config(cfg: dict):
     atomic_write_json(CONFIG_FILE, cfg)
+
+
+def get_default_projects_dir() -> Path:
+    cfg = load_config()
+    custom_dir = cfg.get("default_projects_dir")
+    if custom_dir:
+        p = Path(os.path.expanduser(custom_dir))
+        return p
+    return HOME / "Developer"
 
 
 def load_projects() -> dict:
@@ -136,10 +146,31 @@ def save_projects(data: dict):
     atomic_write_json(PROJECTS_FILE, data)
 
 
-def is_safe_project_path(p: Path) -> tuple:
-    """Validate project path against directory traversal and critical system targets."""
+def is_safe_project_path(p: Path, target_os: str = None) -> tuple:
+    """Validate project path against directory traversal and critical system targets across OSes."""
+    s = str(p).strip()
+    if not s:
+        return False, "Путь не может быть пустым."
+
+    # Windows-format path check (whether running on Windows or evaluating Windows path on Mac/Linux)
+    is_win_format = bool(re.match(r"^[a-zA-Z]:[\\/]", s)) or (target_os == "Windows")
+    if is_win_format:
+        s_norm = s.lower().replace("/", "\\")
+        # Drive root forbidden (e.g. C:\)
+        if re.match(r"^[a-zA-Z]:\\?$", s_norm):
+            return False, "Нельзя добавлять корневой каталог диска Windows."
+        win_forbidden = [
+            ":\\windows", ":\\program files", ":\\program files (x86)",
+            ":\\system volume information", ":\\$recycle.bin", ":\\recovery"
+        ]
+        for win_fb in win_forbidden:
+            if win_fb in s_norm:
+                return False, f"Запрещено добавлять системный каталог Windows ({win_fb})."
+        return True, "OK"
+
+    # POSIX path check
     try:
-        resolved = Path(p).resolve()
+        resolved = Path(os.path.expanduser(s)).resolve()
     except Exception as e:
         return False, f"Некорректный путь: {e}"
 
@@ -158,7 +189,7 @@ def is_safe_project_path(p: Path) -> tuple:
     if resolved == DEFAULT_GIT_SYNC_DIR or DEFAULT_GIT_SYNC_DIR in resolved.parents:
         return False, "Нельзя добавлять служебную папку синхронизации в качестве проекта."
 
-    s = str(resolved).rstrip("/\\")
+    posix_str = str(resolved).rstrip("/")
 
     # POSIX system directories
     posix_forbidden = [
@@ -166,14 +197,8 @@ def is_safe_project_path(p: Path) -> tuple:
         "/boot", "/dev", "/proc", "/sys", "/var", "/private/etc", "/private/var", "/root"
     ]
     for fb in posix_forbidden:
-        if s == fb or s.startswith(fb + "/") or s.startswith(fb + "\\"):
+        if posix_str == fb or posix_str.startswith(fb + "/"):
             return False, f"Запрещено добавлять системный каталог ({fb})."
-
-    # Windows system directories
-    s_lower = s.lower()
-    for win_fb in [":\\windows", ":\\program files", ":\\program files (x86)", ":\\system volume information"]:
-        if win_fb in s_lower:
-            return False, "Запрещено добавлять системные каталоги Windows."
 
     return True, "OK"
 
@@ -258,15 +283,15 @@ def heal_workspace_uris(db_path: Path):
     """
     Fixes foreign/missing OS paths in conversation_summaries.db across macOS, Windows, and Linux.
     Prevents 'Missing folder' / 'Пропавшая папка' warnings when opening chats synced from another OS.
+    Automatically binds workspaces to each project's configured local directory.
     """
     db_path = Path(db_path)
     if not db_path.exists():
         return
 
-    home = Path.home()
-    developer_dir = home / "Developer"
+    default_projects_dir = get_default_projects_dir()
     scratch_dir = GEMINI_ANTIGRAVITY / "scratch"
-    developer_dir.mkdir(parents=True, exist_ok=True)
+    default_projects_dir.mkdir(parents=True, exist_ok=True)
     scratch_dir.mkdir(parents=True, exist_ok=True)
 
     projects_data = load_projects()
@@ -320,20 +345,22 @@ def heal_workspace_uris(db_path: Path):
 
                 matched_target = None
                 for proj_name, proj_path in tracked_projects.items():
-                    if (proj_name in base_name.lower() or
+                    if (proj_name == base_name.lower() or
+                        proj_name in base_name.lower() or
                         base_name.lower() in proj_name or
                         "дизайн" in base_name.lower() and "design" in proj_name):
                         matched_target = proj_path
                         break
 
-                if matched_target and matched_target.exists():
+                if matched_target:
+                    matched_target.mkdir(parents=True, exist_ok=True)
                     new_uris.append(matched_target.as_uri())
                 elif "antigravity" in str(path_obj).lower():
                     local_target = scratch_dir / base_name
                     local_target.mkdir(parents=True, exist_ok=True)
                     new_uris.append(local_target.as_uri())
                 else:
-                    local_target = developer_dir / base_name
+                    local_target = default_projects_dir / base_name
                     local_target.mkdir(parents=True, exist_ok=True)
                     new_uris.append(local_target.as_uri())
 
@@ -477,6 +504,27 @@ def copy_all_to_target(target_dir: Path):
         projects_target = target_dir / "projects"
         projects_target.mkdir(parents=True, exist_ok=True)
 
+        # Merge with existing registry in target to preserve cross-OS target paths
+        remote_reg_file = target_dir / "projects_registry.json"
+        if remote_reg_file.exists():
+            try:
+                with open(remote_reg_file, "r", encoding="utf-8") as f:
+                    old_remote = json.load(f)
+                old_remote_projects = {p["name"]: p for p in old_remote.get("projects", [])}
+                for prj in projects_data["projects"]:
+                    p_name = prj["name"]
+                    if p_name in old_remote_projects:
+                        rem_p = old_remote_projects[p_name]
+                        rem_targets = rem_p.get("target_paths", {})
+                        local_targets = prj.setdefault("target_paths", {})
+                        for os_k, val in rem_targets.items():
+                            if os_k not in local_targets:
+                                local_targets[os_k] = val
+                        if not prj.get("custom_path") and rem_p.get("custom_path"):
+                            prj["custom_path"] = rem_p["custom_path"]
+            except Exception:
+                pass
+
         # Save registry snapshot into target
         atomic_write_json(target_dir / "projects_registry.json", projects_data)
 
@@ -563,28 +611,78 @@ def restore_all_from_target(target_dir: Path):
             with open(registry_file, "r", encoding="utf-8") as f:
                 remote_registry = json.load(f)
             local_registry = load_projects()
-            known_names = {p["name"]: p for p in local_registry["projects"]}
+            known_names = {p["name"]: p for p in local_registry.get("projects", [])}
 
             for prj in remote_registry.get("projects", []):
                 p_name = prj["name"]
-                p_path_str = prj["path"]
+                remote_path_str = prj.get("path", "")
+                remote_targets = prj.get("target_paths", {})
+                custom_path = prj.get("custom_path")
 
-                is_safe, reason = is_safe_project_path(Path(p_path_str))
-                safe_target_path = Path(p_path_str)
+                dest_path = None
 
-                # Cross-platform path adaptation
-                if not is_safe or (SYSTEM_OS != "Windows" and ":\\" in p_path_str) or (SYSTEM_OS == "Windows" and p_path_str.startswith("/")):
-                    safe_target_path = HOME / "Developer" / p_name
-                    print(f"[Antigravity Sync] Адаптация пути для текущей ОС ({SYSTEM_OS}): {p_name} -> {safe_target_path}")
+                # 1. Has user locally configured this project?
+                if p_name in known_names:
+                    existing_path = Path(known_names[p_name]["path"])
+                    dest_path = existing_path
+
+                # 2. Check explicit target path for current OS
+                if not dest_path and SYSTEM_OS in remote_targets:
+                    candidate = Path(os.path.expanduser(remote_targets[SYSTEM_OS]))
+                    is_safe, _ = is_safe_project_path(candidate, target_os=SYSTEM_OS)
+                    if is_safe:
+                        dest_path = candidate
+
+                # 3. Check 'default' target path
+                if not dest_path and "default" in remote_targets:
+                    candidate = Path(os.path.expanduser(remote_targets["default"]))
+                    is_safe, _ = is_safe_project_path(candidate, target_os=SYSTEM_OS)
+                    if is_safe:
+                        dest_path = candidate
+
+                # 4. Check custom_path
+                if not dest_path and custom_path:
+                    candidate = Path(os.path.expanduser(custom_path))
+                    is_safe, _ = is_safe_project_path(candidate, target_os=SYSTEM_OS)
+                    is_win_str = bool(re.match(r"^[a-zA-Z]:[\\/]", custom_path))
+                    if is_safe and ((SYSTEM_OS == "Windows" and is_win_str) or (SYSTEM_OS != "Windows" and not is_win_str)):
+                        dest_path = candidate
+
+                # 5. Check remote_path
+                if not dest_path and remote_path_str:
+                    is_win_remote = bool(re.match(r"^[a-zA-Z]:[\\/]", remote_path_str))
+                    if (SYSTEM_OS == "Windows" and is_win_remote) or (SYSTEM_OS != "Windows" and not is_win_remote):
+                        candidate = Path(remote_path_str)
+                        is_safe, _ = is_safe_project_path(candidate, target_os=SYSTEM_OS)
+                        if is_safe:
+                            dest_path = candidate
+
+                # 6. Fallback to default projects directory
+                if not dest_path:
+                    dest_path = get_default_projects_dir() / p_name
+                    print(f"[Antigravity Sync] Выбрана папка для проекта '{p_name}': {dest_path}")
+
+                dest_path = dest_path.resolve() if not (SYSTEM_OS == "Windows" and ":" in str(dest_path) and "\\" not in str(dest_path)) else dest_path
+
+                # Merge target paths
+                merged_targets = dict(remote_targets)
+                merged_targets[SYSTEM_OS] = str(dest_path)
 
                 if p_name not in known_names:
-                    local_registry["projects"].append({
+                    local_registry.setdefault("projects", []).append({
                         "name": p_name,
-                        "path": str(safe_target_path),
+                        "path": str(dest_path),
+                        "target_paths": merged_targets,
+                        "custom_path": str(dest_path),
                         "added_at": prj.get("added_at", datetime.now().isoformat())
                     })
                 else:
-                    known_names[p_name]["path"] = str(safe_target_path)
+                    known_names[p_name]["path"] = str(dest_path)
+                    cur_targets = known_names[p_name].setdefault("target_paths", {})
+                    for k, v in merged_targets.items():
+                        if k not in cur_targets:
+                            cur_targets[k] = v
+                    cur_targets[SYSTEM_OS] = str(dest_path)
 
             save_projects(local_registry)
         except Exception as e:
@@ -607,12 +705,12 @@ def restore_all_from_target(target_dir: Path):
 
 
 # ----------------------------------------------------
-# Project Management Commands
+# Project Management Commands (Custom per-project directories)
 # ----------------------------------------------------
-def project_add(path_str: str, name: str = None):
+def project_add(path_str: str, name: str = None, target_path_str: str = None):
     p = Path(os.path.expanduser(path_str))
 
-    is_safe, reason = is_safe_project_path(p)
+    is_safe, reason = is_safe_project_path(p, target_os=SYSTEM_OS)
     if not is_safe:
         print(f"[Error] Отклонено из соображений безопасности: {reason}")
         sys.exit(1)
@@ -626,33 +724,161 @@ def project_add(path_str: str, name: str = None):
         sys.exit(1)
 
     project_name = name or p.name
-    project_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", project_name)
+    project_name = re.sub(r"[^\w\-\.]", "_", project_name, flags=re.UNICODE)
 
     data = load_projects()
-    for prj in data["projects"]:
+    existing_prj = None
+    for prj in data.get("projects", []):
         if prj["name"] == project_name or prj["path"] == str(p):
-            prj["path"] = str(p)
-            prj["updated_at"] = datetime.now().isoformat()
-            save_projects(data)
-            print(f"[Antigravity Sync] Проект '{project_name}' обновлен в синхронизации: {p}")
-            return
+            existing_prj = prj
+            break
 
-    data["projects"].append({
+    if existing_prj:
+        existing_prj["path"] = str(p)
+        existing_prj.setdefault("target_paths", {})[SYSTEM_OS] = str(p)
+        if target_path_str:
+            existing_prj["target_paths"]["default"] = target_path_str
+            existing_prj["custom_path"] = target_path_str
+        existing_prj["updated_at"] = datetime.now().isoformat()
+        save_projects(data)
+        print(f"[Antigravity Sync] Проект '{project_name}' обновлен в синхронизации: {p}")
+        if target_path_str:
+            print(f"  Целевая папка для восстановления: {target_path_str}")
+        return
+
+    prj_entry = {
         "name": project_name,
         "path": str(p),
+        "target_paths": {
+            SYSTEM_OS: str(p)
+        },
         "added_at": datetime.now().isoformat()
-    })
+    }
+    if target_path_str:
+        prj_entry["target_paths"]["default"] = target_path_str
+        prj_entry["custom_path"] = target_path_str
+
+    data.setdefault("projects", []).append(prj_entry)
     save_projects(data)
     print(f"[Antigravity Sync] Проект '{project_name}' успешно добавлен в синхронизацию: {p}")
+    if target_path_str:
+        print(f"  Целевая папка для восстановления: {target_path_str}")
+
+
+def project_set_path(identifier: str, new_path_str: str):
+    data = load_projects()
+    norm_id = identifier.lower().strip()
+
+    target_prj = None
+    for prj in data.get("projects", []):
+        if prj["name"].lower() == norm_id or prj["path"].lower() == norm_id:
+            target_prj = prj
+            break
+
+    if not target_prj:
+        print(f"[Error] Проект '{identifier}' не найден в списке отслеживаемых.")
+        print("Используйте 'sync.sh project list', чтобы увидеть список проектов.")
+        sys.exit(1)
+
+    new_p = Path(os.path.expanduser(new_path_str)).resolve()
+    is_safe, reason = is_safe_project_path(new_p, target_os=SYSTEM_OS)
+    if not is_safe:
+        print(f"[Error] Недопустимый путь для проекта: {reason}")
+        sys.exit(1)
+
+    old_p = Path(target_prj["path"])
+    print(f"[Antigravity Sync] Изменение папки для проекта '{target_prj['name']}':")
+    print(f"  Текущий путь: {old_p}")
+    print(f"  Новый путь:   {new_p}")
+
+    # Transfer files if old path exists and new path is empty
+    if old_p.exists() and old_p != new_p:
+        new_p.mkdir(parents=True, exist_ok=True)
+        if not any(new_p.iterdir()):
+            print(f"[Antigravity Sync] Перенос файлов проекта в новую папку...")
+            sync_tree(old_p, new_p, PROJECT_EXCLUDES, delete=False)
+            print(f"[Antigravity Sync] Файлы проекта успешно скопированы в {new_p}")
+
+    new_p.mkdir(parents=True, exist_ok=True)
+    target_prj["path"] = str(new_p)
+    target_prj.setdefault("target_paths", {})[SYSTEM_OS] = str(new_p)
+    target_prj["custom_path"] = str(new_p)
+    target_prj["updated_at"] = datetime.now().isoformat()
+
+    save_projects(data)
+    print(f"[Antigravity Sync] Проект '{target_prj['name']}' теперь привязан к: {new_p}")
+
+    # Heal workspace URIs
+    summary_db = GEMINI_ANTIGRAVITY / "conversation_summaries.db"
+    if summary_db.exists():
+        heal_workspace_uris(summary_db)
+        print("[Antigravity Sync] Пути в истории диалогов обновлены для новой папки.")
+
+
+def project_set_target(identifier: str, os_name: str, target_path_str: str):
+    data = load_projects()
+    norm_id = identifier.lower().strip()
+
+    target_prj = None
+    for prj in data.get("projects", []):
+        if prj["name"].lower() == norm_id or prj["path"].lower() == norm_id:
+            target_prj = prj
+            break
+
+    if not target_prj:
+        print(f"[Error] Проект '{identifier}' не найден в списке отслеживаемых.")
+        sys.exit(1)
+
+    os_norm = os_name.lower().strip()
+    if os_norm in ("win", "windows"):
+        os_key = "Windows"
+    elif os_norm in ("mac", "macos", "darwin", "osx"):
+        os_key = "Darwin"
+    elif os_norm in ("linux", "ubuntu", "debian"):
+        os_key = "Linux"
+    elif os_norm in ("all", "default"):
+        os_key = "default"
+    else:
+        print(f"[Error] Неизвестная ОС '{os_name}'. Допустимо: windows, mac, linux, default")
+        sys.exit(1)
+
+    is_safe, reason = is_safe_project_path(Path(target_path_str), target_os=os_key)
+    if not is_safe:
+        print(f"[Error] Недопустимый путь: {reason}")
+        sys.exit(1)
+
+    target_prj.setdefault("target_paths", {})[os_key] = target_path_str
+    target_prj["updated_at"] = datetime.now().isoformat()
+    save_projects(data)
+    print(f"[Antigravity Sync] Для проекта '{target_prj['name']}' установлен целевой путь на {os_key}: {target_path_str}")
+
+
+def project_default_dir(new_dir: str = None):
+    cfg = load_config()
+    if not new_dir:
+        current = cfg.get("default_projects_dir", str(HOME / "Developer"))
+        print(f"[Antigravity Sync] Текущая папка для проектов по умолчанию: {current}")
+        return
+
+    p = Path(os.path.expanduser(new_dir)).resolve()
+    is_safe, reason = is_safe_project_path(p, target_os=SYSTEM_OS)
+    if not is_safe:
+        print(f"[Error] Недопустимый каталог: {reason}")
+        sys.exit(1)
+
+    p.mkdir(parents=True, exist_ok=True)
+    cfg["default_projects_dir"] = str(p)
+    save_config(cfg)
+    print(f"[Antigravity Sync] Папка для проектов по умолчанию установлена: {p}")
 
 
 def project_remove(identifier: str):
     data = load_projects()
-    initial_len = len(data["projects"])
+    initial_len = len(data.get("projects", []))
     norm_id = str(Path(os.path.expanduser(identifier)).resolve()) if os.path.exists(os.path.expanduser(identifier)) else identifier
 
     data["projects"] = [
-        p for p in data["projects"]
+        p for p in data.get("projects", [])
         if p["name"] != identifier and p["path"] != norm_id and p["path"] != identifier
     ]
     if len(data["projects"]) < initial_len:
@@ -669,10 +895,21 @@ def project_list():
         print("[Antigravity Sync] Список проектов пуст. Добавьте проект: sync.sh project add <путь>")
         return
 
-    print("=== Отслеживаемые проекты для синхронизации ===")
+    cfg = load_config()
+    default_dir = cfg.get("default_projects_dir", str(HOME / "Developer"))
+
+    print(f"=== Отслеживаемые проекты (папка по умолчанию: {default_dir}) ===")
     for idx, p in enumerate(projects, 1):
         status = "Доступен локально" if os.path.exists(p["path"]) else "НЕ НАЙДЕН на этом компьютере"
-        print(f"{idx}. {p['name']} -> {p['path']} ({status})")
+        print(f"\n{idx}. [{p['name']}]")
+        print(f"   Локальный путь: {p['path']} ({status})")
+        targets = p.get("target_paths", {})
+        if targets:
+            target_strs = [f"{os_k}: {path_v}" for os_k, path_v in targets.items()]
+            print(f"   Целевые папки: {', '.join(target_strs)}")
+        if p.get("custom_path"):
+            print(f"   Пользовательская папка: {p['custom_path']}")
+    print("")
 
 
 # ----------------------------------------------------
@@ -945,10 +1182,13 @@ def print_help():
     print("     gdrive pull               - Загрузить из Google Drive")
     print("     gdrive status             - Статус синхронизации Google Drive")
     print("")
-    print("  3. Проекты:")
-    print("     project add <путь> [имя]  - Добавить проект в синхронизацию")
-    print("     project remove <имя>      - Удалить проект из синхронизации")
-    print("     project list              - Список отслеживаемых проектов")
+    print("  3. Проекты (выбор индивидуальной папки для каждого проекта):")
+    print("     project add <путь> [имя] [папка]     - Добавить проект (с возможностью указать целевую папку)")
+    print("     project set-path <имя> <новый_путь>  - Задать/изменить локальную папку для проекта на этом ПК")
+    print("     project set-target <имя> <os> <путь> - Задать целевую папку для ОС (windows/mac/linux/default)")
+    print("     project default-dir [путь]           - Посмотреть или изменить общую папку для проектов")
+    print("     project remove <имя>                 - Удалить проект из синхронизации")
+    print("     project list                         - Список отслеживаемых проектов и их папок")
     print("")
     print("  4. Все источники сразу:")
     print("     all push | all pull | all status")
@@ -1031,19 +1271,40 @@ def main():
         sub = sys.argv[2].lower() if len(sys.argv) > 2 else "list"
         if sub == "add":
             if len(sys.argv) < 4:
-                print("Укажите путь к проекту: sync.sh project add <путь> [имя]")
+                print("Использование: sync.sh project add <путь_к_проекту> [имя] [целевая_папка]")
                 sys.exit(1)
-            name = sys.argv[4] if len(sys.argv) > 4 else None
-            project_add(sys.argv[3], name)
+            src_path = sys.argv[3]
+            name = sys.argv[4] if len(sys.argv) > 4 and not sys.argv[4].startswith("/") and not sys.argv[4].startswith("\\") and ":" not in sys.argv[4] else None
+            target_path = None
+            if len(sys.argv) > 5:
+                target_path = sys.argv[5]
+            elif len(sys.argv) == 5 and (sys.argv[4].startswith("/") or sys.argv[4].startswith("\\") or ":" in sys.argv[4] or sys.argv[4].startswith("~")):
+                # User passed: project add <src> <target_path> without custom name
+                name = None
+                target_path = sys.argv[4]
+            project_add(src_path, name, target_path)
+        elif sub in ("set-path", "move", "path"):
+            if len(sys.argv) < 5:
+                print("Использование: sync.sh project set-path <имя_проекта> <новый_путь>")
+                sys.exit(1)
+            project_set_path(sys.argv[3], sys.argv[4])
+        elif sub in ("set-target", "target"):
+            if len(sys.argv) < 6:
+                print("Использование: sync.sh project set-target <имя_проекта> <windows|mac|linux|default> <целевой_путь>")
+                sys.exit(1)
+            project_set_target(sys.argv[3], sys.argv[4], sys.argv[5])
+        elif sub in ("default-dir", "default-path"):
+            new_dir = sys.argv[3] if len(sys.argv) > 3 else None
+            project_default_dir(new_dir)
         elif sub == "remove":
             if len(sys.argv) < 4:
-                print("Укажите имя или путь проекта: sync.sh project remove <имя>")
+                print("Использование: sync.sh project remove <имя_или_путь>")
                 sys.exit(1)
             project_remove(sys.argv[3])
         elif sub == "list":
             project_list()
         else:
-            print("Команды project: add <путь> [имя] | remove <имя> | list")
+            print("Команды project: add | set-path | set-target | default-dir | remove | list")
 
     elif cmd == "all":
         sub = sys.argv[2].lower() if len(sys.argv) > 2 else "push"

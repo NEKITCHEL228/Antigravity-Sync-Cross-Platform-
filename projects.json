@@ -3,7 +3,12 @@
     {
       "name": "computer-design",
       "path": "/Users/nikitaprime/Developer/computer-design",
-      "added_at": "2026-10-24T21:48:21"
+      "added_at": "2026-10-24T21:48:21",
+      "target_paths": {
+        "Windows": "C:\\Developer\\computer-design",
+        "Darwin": "/Users/nikitaprime/Developer/computer-design"
+      },
+      "updated_at": "2026-10-24T23:45:14.659048"
     }
   ]
 }

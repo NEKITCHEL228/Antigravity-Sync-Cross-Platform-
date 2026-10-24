@@ -26,21 +26,43 @@ The plugin automatically captures and synchronizes full conversation trajectorie
 
 ## 2. Project Management via Chat
 
-When the user asks to add, remove, or view projects in synchronization:
+Users can choose individual target directories for each project. When the user asks to add, relocate, or configure projects in synchronization:
 
-### Adding a Project:
-- **Triggers**: "добавь проект X в синхронизацию", "добавь текущий проект", "sync project /path/to/project", "включи проект в бэкап"
+### Adding a Project (with optional custom destination folder):
+- **Triggers**: "добавь проект X в синхронизацию", "добавь текущий проект", "sync project /path/to/project", "включи проект в бэкап", "добавь проект X в папку Y"
 - **Action**:
-  1. If the user specifies a path (e.g. `/Users/name/projects/my-app`, `C:\dev\app` or `~/dev/app`), expand and validate it.
+  1. If the user specifies a source path and optional custom target path, expand and validate them.
   2. If the user says "текущий проект" or doesn't specify a path, check the active workspace or ask the user for the directory path.
   3. Execute:
      ```bash
-     ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add "<path>" "[optional_name]"
+     ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add "<path>" "[optional_name]" "[optional_target_folder]"
      ```
   4. Confirm to the user that the project has been added. Heavy dependencies (`node_modules`, `.venv`, `.git`, build directories) and sensitive files (`.env`, keys, secrets) are automatically excluded.
 
+### Changing / Choosing a Project's Folder:
+- **Triggers**: "измени папку для проекта X на Y", "перенеси проект X в папку Y", "сохраняй проект X в /path", "пусть проект X лежит в /path", "set project path"
+- **Action**: Run:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-path "<project_name>" "<new_path>"
+  ```
+  This updates the project binding, moves existing project files if the new directory is empty, and automatically heals conversation history links (`conversation_summaries.db`) so active chats point to the new folder without "missing folder" errors.
+
+### Setting OS-Specific Target Directories:
+- **Triggers**: "на Windows сохраняй проект X в D:\Projects\X", "для Mac путь к проекту X /custom/path", "set target path"
+- **Action**: Run:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-target "<project_name>" "<windows|mac|linux|default>" "<target_path>"
+  ```
+
+### Setting Default Directory for All Projects:
+- **Triggers**: "сохраняй проекты по умолчанию в ~/MyProjects", "измени стандартную папку для проектов"
+- **Action**: Run:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project default-dir "<new_default_directory>"
+  ```
+
 ### Listing Projects:
-- **Triggers**: "какие проекты синхронизируются?", "покажи список проектов", "list synced projects"
+- **Triggers**: "какие проекты синхронизируются?", "покажи список проектов", "list synced projects", "где лежат проекты?"
 - **Action**: Run:
   ```bash
   ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project list

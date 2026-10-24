@@ -11,9 +11,9 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-yellow.svg)]()
 [![Antigravity](https://img.shields.io/badge/Google%20Antigravity-2.0-blue.svg)]()
-[![Version](https://img.shields.io/badge/Version-1.3.1-orange.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.4.0-orange.svg)]()
 
-*Кроссплатформенный плагин резервного копирования и синхронизации для Google Antigravity (Git & Google Drive). Непрерывность диалогов с моделями, сохранение контекста, настроек и проектов.*
+*Кроссплатформенный плагин резервного копирования и синхронизации для Google Antigravity (Git & Google Drive). Непрерывность диалогов с моделями, сохранение контекста, настроек и проектов с выбором индивидуальных папок.*
 
 ---
 
@@ -27,12 +27,12 @@
 ## Ключевые возможности
 * 💬 **Продолжение диалогов на любом компьютере:** автоматический захват и перенос всей траектории переписки (`conversations/*.db`), степов выполнения, артефактов и транскриптов (`transcript.jsonl`). Пересаживайтесь за другой ноутбук или ПК и продолжайте разговор с агентом с того же места!
 * 🗄️ **Надёжный бэкап и слияние SQLite:** использование штатного API `sqlite3.backup()` позволяет создавать снимки баз данных «на лету» без блокировок и потери несохранённых данных из WAL-файлов. История диалогов с разных устройств объединяется без перезаписи.
-* 🩹 **Автоматическое исправление путей рабочих папок:** сопоставляет и перелинковывает пути из других ОС (например, диски Windows `C:\` на macOS), предотвращая ошибки «Пропавшая папка» (Missing folder) при открытии синхронизированных диалогов.
+* 📁 **Индивидуальные папки для каждого проекта:** возможность выбирать, куда именно восстанавливать или сохранять каждый проект. Проекты могут жить в совершенно разных папках на разных компьютерах (`project set-path`, `project set-target`, `project default-dir`).
+* 🩹 **Автоматическое исправление путей рабочих папок:** сопоставляет и перелинковывает пути из других ОС (например, диски Windows `C:\` на macOS), предотвращая ошибки «Пропавшая папка» (Missing folder) при открытии синхронизированных диалогов и привязывая чаты к выбранной пользователем папке.
 * 🌐 **Полная кроссплатформенность:** ядро на чистом Python 3 без сторонних зависимостей. Работает без `rsync`, MSYS2 или Cygwin. Включает готовые лаунчеры для bash (`sync.sh`) и Windows (`sync.cmd`).
 * ☁️ **Два провайдера синхронизации:**
   * **Git:** приватные репозитории на GitHub, GitLab или любом Git-сервере.
   * **Google Drive:** автоматическое обнаружение путей на macOS (CloudStorage), Windows (виртуальные диски `G:\`, `H:\`) и Linux (GVFS).
-* 📁 **Управление проектами через чат:** подключайте любые локальные папки и репозитории к синхронизации прямо фразой в диалоге с агентом.
 * 🛡️ **Безопасность данных (Zero-Leakage):**
   * Автоматическая изоляция секретов (`.env*`, SSH-ключи `id_rsa*`, SSL-сертификаты `*.pem`, `*.key`, OAuth-токены сессий `jetski-standalone-oauth-token`, `*.token`).
   * Исключение тяжёлых папок (`node_modules`, `.venv`, `.git`, кэши сборки).
@@ -60,14 +60,17 @@
 
 ## Команды в чате с агентом (Нейросеть)
 
-Синхронизацией можно управлять обычными фразами в чате:
+Синхронизацией и папками проектов можно управлять обычными фразами в чате:
 
 | Действие | Пример фразы в чате |
 | :--- | :--- |
 | **Синхронизировать переписку и контекст** | *«Синхронизируй историю переписки»* или *«Бэкап диалогов в Google Drive»* |
 | **Подтянуть историю чатов** | *«Подтяни историю диалогов из Git»* или *«Восстанови чаты из Google Drive»* |
-| **Добавить проект** | *«Добавь проект `/Users/.../my-app` в синхронизацию»* |
-| **Список проектов** | *«Какие проекты сейчас синхронизируются?»* |
+| **Добавить проект в синхронизацию** | *«Добавь проект `/Users/.../my-app` в синхронизацию»* или *«Добавь проект X в папку Y»* |
+| **Выбрать / изменить папку проекта** | *«Перенеси проект `my-app` в папку `/new/path`»* или *«Сохраняй проект `my-app` в `D:\Projects\app`»* |
+| **Настроить папку для конкретной ОС** | *«На Windows восстанавливай проект `my-app` в `C:\work\app`»* |
+| **Папка по умолчанию для всех проектов** | *«Сделай стандартной папкой для проектов `~/MyProjects`»* |
+| **Список проектов** | *«Какие проекты сейчас синхронизируются?»* или *«Где лежат мои проекты?»* |
 | **Google Drive** | *«Синхронизируй с Google Drive»* или *«Подтяни данные с Google Drive»* |
 | **Git** | *«Синхронизируй с Git»* или *«Подтяни изменения из Git»* |
 | **Полная синхронизация** | *«Синхронизируй всё»* (отправка диалогов, настроек и проектов в Git и Google Drive) |
@@ -88,8 +91,12 @@
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh gdrive push
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh gdrive pull
 
-# Добавить проект
-~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add /путь/к/проекту "имя-проекта"
+# Управление проектами и выбор индивидуальных папок
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add /путь/к/проекту [имя] [/целевая/папка]
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-path "имя-проекта" /новый/путь
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-target "имя-проекта" windows "C:\work\app"
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project default-dir ~/MyProjects
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project list
 
 # Синхронизация всех источников
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh all push
@@ -105,6 +112,10 @@ rem Google Drive
 %USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd gdrive push
 %USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd gdrive pull
 
-rem Добавить проект
-%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project add C:\dev\project "project-name"
+rem Управление проектами и выбор индивидуальных папок
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project add C:\dev\project [имя] [C:\целевая\папка]
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project set-path "имя-проекта" D:\Projects\app
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project set-target "имя-проекта" mac "/Users/name/Projects/app"
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project default-dir D:\Projects
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project list
 ```

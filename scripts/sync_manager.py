@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Antigravity Cross-Platform Sync Manager
-Secure, dependency-free synchronization for Antigravity (Git, Google Drive, Projects).
-Compatible with macOS, Linux, and Windows.
+Secure, dependency-free synchronization for Antigravity (Git, Google Drive, Projects, and Conversations).
+Supports full conversation history and context continuity across macOS, Linux, and Windows.
 """
 
 import os
@@ -13,6 +13,7 @@ import re
 import fnmatch
 import platform
 import subprocess
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -24,8 +25,12 @@ PROJECTS_FILE = PLUGIN_DIR / "projects.json"
 HOME = Path.home()
 GEMINI_DIR = HOME / ".gemini"
 GEMINI_CONFIG = GEMINI_DIR / "config"
-GEMINI_BRAIN = GEMINI_DIR / "antigravity" / "brain"
-GEMINI_SCRATCH = GEMINI_DIR / "antigravity" / "scratch"
+GEMINI_ANTIGRAVITY = GEMINI_DIR / "antigravity"
+GEMINI_BRAIN = GEMINI_ANTIGRAVITY / "brain"
+GEMINI_CONVERSATIONS = GEMINI_ANTIGRAVITY / "conversations"
+GEMINI_ANNOTATIONS = GEMINI_ANTIGRAVITY / "annotations"
+GEMINI_PRESENCE = GEMINI_ANTIGRAVITY / "presence"
+GEMINI_SCRATCH = GEMINI_ANTIGRAVITY / "scratch"
 DEFAULT_GIT_SYNC_DIR = HOME / ".antigravity-sync"
 
 SYSTEM_OS = platform.system()  # 'Darwin', 'Linux', 'Windows'
@@ -42,7 +47,7 @@ SENSITIVE_EXCLUDES = [
     "jetski-standalone-oauth-token",
     "*.sqlite-wal", "*.db-wal", "*.db-shm", "*.lock",
     ".git/credentials", ".git/config",
-    "*.log", "*.dump"
+    "*.dump"
 ]
 
 # Heavy directories and cache files
@@ -67,10 +72,12 @@ CONFIG_EXCLUDES = SENSITIVE_EXCLUDES + [
     "Thumbs.db"
 ]
 
-# Brain artifacts excludes
+# Brain artifacts excludes (Preserves transcript.jsonl, steps, and messages for full conversation context)
 BRAIN_EXCLUDES = SENSITIVE_EXCLUDES + [
-    ".system_generated",
-    "*.log"
+    "*.lock",
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini"
 ]
 
 
@@ -103,7 +110,11 @@ def load_config() -> dict:
                 return json.load(f)
         except Exception:
             pass
-    return {"git_sync_dir": str(DEFAULT_GIT_SYNC_DIR), "gdrive_path": ""}
+    return {
+        "git_sync_dir": str(DEFAULT_GIT_SYNC_DIR),
+        "gdrive_path": "",
+        "sync_conversations": True
+    }
 
 
 def save_config(cfg: dict):
@@ -192,6 +203,57 @@ def match_any(name: str, patterns: list) -> bool:
 
 
 # ----------------------------------------------------
+# SQLite Backup & Merge for Conversations
+# ----------------------------------------------------
+def backup_sqlite_db(src_path: Path, dst_path: Path) -> bool:
+    """Safely snapshot a live SQLite database with WAL commits into a standalone file."""
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+    if not src_path.exists():
+        return False
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        src_conn = sqlite3.connect(str(src_path))
+        dst_conn = sqlite3.connect(str(dst_path))
+        src_conn.backup(dst_conn)
+        dst_conn.close()
+        src_conn.close()
+        return True
+    except Exception as e:
+        print(f"[Warn] Ошибка резервного копирования базы {src_path.name}: {e}")
+        return False
+
+
+def merge_summaries_db(src_db: Path, local_db: Path):
+    """Merges conversation summaries across multiple devices without data loss."""
+    src_db = Path(src_db)
+    local_db = Path(local_db)
+    if not src_db.exists():
+        return
+
+    if not local_db.exists():
+        backup_sqlite_db(src_db, local_db)
+        return
+
+    try:
+        conn = sqlite3.connect(str(local_db))
+        conn.execute(f"ATTACH DATABASE \"{src_db}\" AS remote_summary")
+        c = conn.cursor()
+        c.execute("SELECT name FROM remote_summary.sqlite_master WHERE type='table' AND name='conversation_summaries'")
+        if c.fetchone():
+            conn.execute("""
+                INSERT OR REPLACE INTO conversation_summaries
+                SELECT * FROM remote_summary.conversation_summaries;
+            """)
+            conn.commit()
+        conn.execute("DETACH DATABASE remote_summary")
+        conn.close()
+    except Exception as e:
+        print(f"[Warn] Ошибка объединения conversation_summaries.db: {e}")
+
+
+# ----------------------------------------------------
 # Pure-Python Cross-Platform File Synchronizer
 # ----------------------------------------------------
 def sync_tree(src: Path, dst: Path, excludes: list, delete: bool = False) -> tuple:
@@ -210,7 +272,6 @@ def sync_tree(src: Path, dst: Path, excludes: list, delete: bool = False) -> tup
     copied = 0
     all_target_rel_paths = set()
 
-    # Walk source tree
     for root, dirs, files in os.walk(src, followlinks=False):
         try:
             rel_root = Path(root).relative_to(src)
@@ -232,7 +293,6 @@ def sync_tree(src: Path, dst: Path, excludes: list, delete: bool = False) -> tup
             rel_file = rel_root / f
             all_target_rel_paths.add(str(rel_file))
 
-            # Determine if copy is required (size or modification time difference)
             need_copy = False
             try:
                 if not dst_file.exists():
@@ -246,11 +306,9 @@ def sync_tree(src: Path, dst: Path, excludes: list, delete: bool = False) -> tup
                 if need_copy:
                     shutil.copy2(src_file, dst_file, follow_symlinks=False)
                     copied += 1
-            except Exception as e:
-                # Silently skip file lock errors on live files
+            except Exception:
                 pass
 
-    # Handle deletion of removed files if requested
     if delete:
         for root, dirs, files in os.walk(dst, followlinks=False):
             try:
@@ -270,10 +328,13 @@ def sync_tree(src: Path, dst: Path, excludes: list, delete: bool = False) -> tup
 
 
 # ----------------------------------------------------
-# Target Sync Utilities (Config, Brain, Projects)
+# Target Sync Utilities (Config, Brain, Conversations, Projects)
 # ----------------------------------------------------
 def copy_all_to_target(target_dir: Path):
-    """Copies configurations, brain artifacts, and registered projects to target directory."""
+    """
+    Copies configurations, conversation histories (with context and steps),
+    brain artifacts, and registered projects to target directory.
+    """
     target_dir = Path(target_dir)
 
     # 1. Antigravity Configuration
@@ -281,12 +342,37 @@ def copy_all_to_target(target_dir: Path):
         dst = target_dir / "config"
         sync_tree(GEMINI_CONFIG, dst, CONFIG_EXCLUDES, delete=True)
 
-    # 2. Brain Artifacts
+    # 2. Conversation Trajectories & Messages
+    if GEMINI_CONVERSATIONS.exists():
+        conv_target = target_dir / "data" / "conversations"
+        conv_target.mkdir(parents=True, exist_ok=True)
+        for db_file in GEMINI_CONVERSATIONS.glob("*.db"):
+            dst_db = conv_target / db_file.name
+            backup_sqlite_db(db_file, dst_db)
+
+    # 3. Conversation Summaries (Sidebar History List)
+    summary_db = GEMINI_ANTIGRAVITY / "conversation_summaries.db"
+    if summary_db.exists():
+        backup_sqlite_db(summary_db, target_dir / "data" / "conversation_summaries.db")
+
+    proto_file = GEMINI_ANTIGRAVITY / "agyhub_summaries_proto.pb"
+    if proto_file.exists():
+        (target_dir / "data").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(proto_file, target_dir / "data" / proto_file.name)
+
+    # 4. Annotations
+    if GEMINI_ANNOTATIONS.exists():
+        ann_target = target_dir / "data" / "annotations"
+        ann_target.mkdir(parents=True, exist_ok=True)
+        for ann in GEMINI_ANNOTATIONS.glob("*.pbtxt"):
+            shutil.copy2(ann, ann_target / ann.name)
+
+    # 5. Brain Artifacts & Conversation Transcripts (Context preservation)
     if GEMINI_BRAIN.exists():
         dst = target_dir / "data" / "brain"
         sync_tree(GEMINI_BRAIN, dst, BRAIN_EXCLUDES, delete=False)
 
-    # 3. User Projects
+    # 6. User Projects
     projects_data = load_projects()
     if projects_data.get("projects"):
         projects_target = target_dir / "projects"
@@ -303,7 +389,10 @@ def copy_all_to_target(target_dir: Path):
 
 
 def restore_all_from_target(target_dir: Path):
-    """Restores configurations, brain artifacts, and registered projects from target directory."""
+    """
+    Restores configurations, conversation histories (with context and steps),
+    brain artifacts, and registered projects from target directory.
+    """
     target_dir = Path(target_dir)
 
     # 1. Configuration
@@ -316,14 +405,58 @@ def restore_all_from_target(target_dir: Path):
         else:
             print(f"[Error] Сбой восстановления конфигурации: {err}")
 
-    # 2. Brain Artifacts
+    # 2. Conversation Trajectories & Context (*.db)
+    remote_conv = target_dir / "data" / "conversations"
+    if remote_conv.exists():
+        GEMINI_CONVERSATIONS.mkdir(parents=True, exist_ok=True)
+        restored_count = 0
+        for remote_db in remote_conv.glob("*.db"):
+            local_db = GEMINI_CONVERSATIONS / remote_db.name
+            conv_id = remote_db.stem
+            # Check if conversation is currently active on this machine
+            is_active = (GEMINI_PRESENCE / f"{conv_id}.lock").exists() if GEMINI_PRESENCE.exists() else False
+
+            if not is_active:
+                shutil.copy2(remote_db, local_db)
+                restored_count += 1
+            else:
+                # If active locally, compare modification times
+                if not local_db.exists() or remote_db.stat().st_mtime > local_db.stat().st_mtime:
+                    try:
+                        shutil.copy2(remote_db, local_db)
+                        restored_count += 1
+                    except Exception:
+                        pass
+        print(f"[Antigravity Sync] Диалоги и контекст моделей восстановлены ({restored_count} шт).")
+
+    # 3. Conversation Summaries (Sidebar History)
+    remote_summaries = target_dir / "data" / "conversation_summaries.db"
+    if remote_summaries.exists():
+        GEMINI_ANTIGRAVITY.mkdir(parents=True, exist_ok=True)
+        merge_summaries_db(remote_summaries, GEMINI_ANTIGRAVITY / "conversation_summaries.db")
+        print("[Antigravity Sync] Сводки и история диалогов (summaries) успешно объединены.")
+
+    remote_proto = target_dir / "data" / "agyhub_summaries_proto.pb"
+    if remote_proto.exists():
+        local_proto = GEMINI_ANTIGRAVITY / "agyhub_summaries_proto.pb"
+        if not local_proto.exists() or remote_proto.stat().st_mtime > local_proto.stat().st_mtime:
+            shutil.copy2(remote_proto, local_proto)
+
+    # 4. Annotations
+    remote_ann = target_dir / "data" / "annotations"
+    if remote_ann.exists():
+        GEMINI_ANNOTATIONS.mkdir(parents=True, exist_ok=True)
+        for ann in remote_ann.glob("*.pbtxt"):
+            shutil.copy2(ann, GEMINI_ANNOTATIONS / ann.name)
+
+    # 5. Brain Artifacts & Transcripts
     src_brain = target_dir / "data" / "brain"
     if src_brain.exists():
         GEMINI_BRAIN.mkdir(parents=True, exist_ok=True)
         sync_tree(src_brain, GEMINI_BRAIN, BRAIN_EXCLUDES, delete=False)
-        print("[Antigravity Sync] Артефакты brain успешно восстановлены.")
+        print("[Antigravity Sync] Артефакты, степы и контекст brain успешно восстановлены.")
 
-    # 3. Projects Registry & Cross-Platform Path Mapping
+    # 6. Projects Registry & Cross-Platform Path Mapping
     registry_file = target_dir / "projects_registry.json"
     if registry_file.exists():
         try:
@@ -336,11 +469,10 @@ def restore_all_from_target(target_dir: Path):
                 p_name = prj["name"]
                 p_path_str = prj["path"]
 
-                # Cross-platform path validation & compatibility
                 is_safe, reason = is_safe_project_path(Path(p_path_str))
                 safe_target_path = Path(p_path_str)
 
-                # If path is incompatible across OS (e.g. Windows drive on Mac, or Unix path on Windows)
+                # Cross-platform path adaptation
                 if not is_safe or (SYSTEM_OS != "Windows" and ":\\" in p_path_str) or (SYSTEM_OS == "Windows" and p_path_str.startswith("/")):
                     safe_target_path = HOME / "Developer" / p_name
                     print(f"[Antigravity Sync] Адаптация пути для текущей ОС ({SYSTEM_OS}): {p_name} -> {safe_target_path}")
@@ -352,14 +484,13 @@ def restore_all_from_target(target_dir: Path):
                         "added_at": prj.get("added_at", datetime.now().isoformat())
                     })
                 else:
-                    # Update existing path
                     known_names[p_name]["path"] = str(safe_target_path)
 
             save_projects(local_registry)
         except Exception as e:
             print(f"[Warn] Ошибка объединения реестра проектов: {e}")
 
-    # 4. Projects Content
+    # 7. Projects Content
     projects_src = target_dir / "projects"
     if projects_src.exists():
         local_registry = load_projects()
@@ -381,7 +512,6 @@ def restore_all_from_target(target_dir: Path):
 def project_add(path_str: str, name: str = None):
     p = Path(os.path.expanduser(path_str))
 
-    # Security validation
     is_safe, reason = is_safe_project_path(p)
     if not is_safe:
         print(f"[Error] Отклонено из соображений безопасности: {reason}")
@@ -396,7 +526,6 @@ def project_add(path_str: str, name: str = None):
         sys.exit(1)
 
     project_name = name or p.name
-    # Sanitize project name
     project_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", project_name)
 
     data = load_projects()
@@ -469,8 +598,6 @@ def detect_gdrive_path() -> list:
                 candidates.append(p / "AntigravitySync")
 
     elif SYSTEM_OS == "Windows":
-        # Check standard drive letters G:, H:, I:, D:, E:
-        import string
         for letter in ["G", "H", "I", "D", "E"]:
             root = Path(f"{letter}:\\")
             if root.exists():
@@ -489,7 +616,6 @@ def detect_gdrive_path() -> list:
             if p.exists():
                 candidates.append(p / "AntigravitySync")
 
-        # GNOME Online Accounts GVFS
         uid = os.getuid() if hasattr(os, "getuid") else 1000
         gvfs = Path(f"/run/user/{uid}/gvfs")
         if gvfs.exists():
@@ -536,6 +662,11 @@ def gdrive_status():
     subdirs = [p.name for p in gd_path.iterdir() if p.is_dir()]
     print(f"[Директории в Google Drive] {', '.join(subdirs) if subdirs else 'Папка пуста'}")
 
+    conv_dir = gd_path / "data" / "conversations"
+    if conv_dir.exists():
+        convs = [p.stem for p in conv_dir.glob("*.db")]
+        print(f"[Синхронизированные диалоги в GDrive] {len(convs)} диалогов")
+
     projects_dir = gd_path / "projects"
     if projects_dir.exists():
         synced_projects = [p.name for p in projects_dir.iterdir() if p.is_dir()]
@@ -548,11 +679,11 @@ def gdrive_push():
         print("[Antigravity Sync] Google Drive не настроен. Укажите путь: sync.sh gdrive set-path <путь>")
         sys.exit(1)
 
-    print(f"[Antigravity Sync] Отправка данных в Google Drive ({gd_path})...")
+    print(f"[Antigravity Sync] Отправка данных и диалогов в Google Drive ({gd_path})...")
     gd_path.mkdir(parents=True, exist_ok=True)
     copy_all_to_target(gd_path)
     atomic_write_json(gd_path / "last_sync.json", {"last_sync": datetime.now().isoformat(), "source": "push"})
-    print(f"[Antigravity Sync] Синхронизация с Google Drive успешно завершена!")
+    print(f"[Antigravity Sync] Синхронизация с Google Drive (включая историю диалогов) успешно завершена!")
 
 
 def gdrive_pull():
@@ -561,9 +692,9 @@ def gdrive_pull():
         print(f"[Antigravity Sync] Папка Google Drive не найдена: {gd_path}")
         sys.exit(1)
 
-    print(f"[Antigravity Sync] Загрузка данных из Google Drive ({gd_path})...")
+    print(f"[Antigravity Sync] Загрузка данных и истории диалогов из Google Drive ({gd_path})...")
     restore_all_from_target(gd_path)
-    print(f"[Antigravity Sync] Данные успешно восстановлены из Google Drive!")
+    print(f"[Antigravity Sync] Настройки и диалоги успешно восстановлены из Google Drive!")
 
 
 # ----------------------------------------------------
@@ -597,7 +728,6 @@ def git_init(remote_url: str):
     if not (DEFAULT_GIT_SYNC_DIR / ".git").exists():
         ok, out = run_git(["init", "-b", "main"], cwd=DEFAULT_GIT_SYNC_DIR)
         if not ok:
-            # Fallback if -b is unsupported by older git versions
             run_git(["init"], cwd=DEFAULT_GIT_SYNC_DIR)
         print(f"[Antigravity Sync] Инициализирован локальный репозиторий в {DEFAULT_GIT_SYNC_DIR}")
 
@@ -622,7 +752,7 @@ def git_init(remote_url: str):
 
     copy_all_to_target(DEFAULT_GIT_SYNC_DIR)
     run_git(["add", "-A"], cwd=DEFAULT_GIT_SYNC_DIR)
-    run_git(["commit", "-m", "Initial Antigravity sync setup", "--"], cwd=DEFAULT_GIT_SYNC_DIR)
+    run_git(["commit", "-m", "Initial Antigravity sync setup with conversation history", "--"], cwd=DEFAULT_GIT_SYNC_DIR)
     print("[Antigravity Sync] Инициализация Git завершена. Выполните: sync.sh push")
 
 
@@ -647,7 +777,7 @@ def git_push(msg: str = None):
         print("[Antigravity Sync] Git-репозиторий не найден. Запустите: sync.sh init <remote-url>")
         sys.exit(1)
 
-    commit_msg = msg or f"Sync Antigravity configuration {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    commit_msg = msg or f"Sync Antigravity configuration & conversation context {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     copy_all_to_target(DEFAULT_GIT_SYNC_DIR)
 
     run_git(["add", "-A"], cwd=DEFAULT_GIT_SYNC_DIR)
@@ -663,7 +793,7 @@ def git_push(msg: str = None):
 
     ok, remotes = run_git(["remote"], cwd=DEFAULT_GIT_SYNC_DIR)
     if "origin" in remotes.split():
-        print("[Antigravity Sync] Отправка изменений в remote origin...")
+        print("[Antigravity Sync] Отправка изменений и контекста диалогов в remote origin...")
         ok_push, out_push = run_git(["push", "-u", "origin", "HEAD"], cwd=DEFAULT_GIT_SYNC_DIR)
         if ok_push:
             print("[Antigravity Sync] Успешно отправлено в Git!")
@@ -683,14 +813,14 @@ def git_pull():
         print("[Error] Remote origin не настроен.")
         sys.exit(1)
 
-    print("[Antigravity Sync] Получение изменений из Git remote...")
+    print("[Antigravity Sync] Получение изменений и контекста диалогов из Git remote...")
     ok_pull, out_pull = run_git(["pull", "--rebase", "origin", "HEAD"], cwd=DEFAULT_GIT_SYNC_DIR)
     if not ok_pull:
         ok_pull, out_pull = run_git(["pull", "origin", "HEAD"], cwd=DEFAULT_GIT_SYNC_DIR)
 
     if ok_pull:
         restore_all_from_target(DEFAULT_GIT_SYNC_DIR)
-        print("[Antigravity Sync] Конфигурация и проекты успешно обновлены из Git!")
+        print("[Antigravity Sync] Конфигурация, диалоги и проекты успешно обновлены из Git!")
     else:
         print(f"[Error] Ошибка обновления из Git: {out_pull}")
 
@@ -701,17 +831,17 @@ def git_pull():
 def print_help():
     print("================ Antigravity Cross-Platform Sync ================")
     print("Использование:")
-    print("  1. Git:")
+    print("  1. Git (включая историю и контекст диалогов):")
     print("     init <repo-url>           - Инициализировать репозиторий")
-    print("     push [сообщение]          - Отправить настройки и проекты в Git")
-    print("     pull                      - Подтянуть настройки и проекты из Git")
+    print("     push [сообщение]          - Отправить настройки, диалоги и проекты в Git")
+    print("     pull                      - Подтянуть настройки, диалоги и проекты из Git")
     print("     status                    - Проверить статус Git")
     print("     sync [сообщение]          - Pull, затем Push в Git")
     print("")
     print("  2. Google Drive:")
     print("     gdrive detect             - Найти Google Drive на компьютере")
     print("     gdrive set-path <путь>    - Указать папку Google Drive вручную")
-    print("     gdrive push               - Синхронизировать в Google Drive")
+    print("     gdrive push               - Синхронизировать в Google Drive (с диалогами)")
     print("     gdrive pull               - Загрузить из Google Drive")
     print("     gdrive status             - Статус синхронизации Google Drive")
     print("")
@@ -732,7 +862,6 @@ def main():
 
     cmd = sys.argv[1].lower()
 
-    # Aliases
     if cmd == "init":
         if len(sys.argv) < 3:
             print("Укажите URL репозитория: sync.sh init <url>")

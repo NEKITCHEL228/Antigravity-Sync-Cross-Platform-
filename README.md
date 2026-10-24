@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-yellow.svg)]()
 [![Antigravity](https://img.shields.io/badge/Google%20Antigravity-2.0-blue.svg)]()
-[![Version](https://img.shields.io/badge/Version-1.3.0-orange.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.3.1-orange.svg)]()
 
 *Universal cross-platform synchronization and backup plugin for Google Antigravity. Seamlessly continue conversations with models and sync configurations, skills, rules, and projects via Git & Google Drive.*
 
@@ -37,6 +37,7 @@
 ### Key Features
 * 💬 **Seamless Conversation Continuity:** Automatically captures and syncs full conversation histories (`conversations/*.db`), step outputs, thought trajectories, and transcripts (`transcript.jsonl`). Switch between machines and continue your chat with the model right where you left off.
 * 🗄️ **Smart SQLite Backup & Merge:** Uses Python's native `sqlite3.backup()` API to snapshot live databases without locking conflicts, safely merging SQLite WAL pages and conversation history lists across devices.
+* 🩹 **Smart Workspace Path Healing:** Automatically detects and repairs non-existent or cross-OS workspace paths (e.g., Windows `C:\` paths opened on macOS) to eliminate "Missing folder" alerts and seamlessly link synced projects and scratch workspaces.
 * 🌐 **100% Cross-Platform:** Pure Python 3 core engine. No external tools like `rsync` or MSYS2 required—runs natively on Windows cmd/PowerShell, macOS, and Linux.
 * ☁️ **Dual Sync Providers:**
   * **Git:** Private GitHub, GitLab, or any remote repository.
@@ -138,6 +139,7 @@ rem Add a project
 ### Ключевые возможности
 * 💬 **Продолжение диалогов на любом компьютере:** автоматический захват и перенос всей траектории переписки (`conversations/*.db`), степов выполнения, артефактов и транскриптов (`transcript.jsonl`). Пересаживайтесь за другой ноутбук или ПК и продолжайте разговор с агентом с того же места!
 * 🗄️ **Надёжный бэкап и слияние SQLite:** использование штатного API `sqlite3.backup()` позволяет создавать снимки баз данных «на лету» без блокировок и потери несохранённых данных из WAL-файлов. История диалогов с разных устройств объединяется без перезаписи.
+* 🩹 **Автоматическое исправление путей рабочих папок:** сопоставляет и перелинковывает пути из других ОС (например, диски Windows `C:\` на macOS), предотвращая ошибки «Пропавшая папка» (Missing folder) при открытии синхронизированных диалогов.
 * 🌐 **Полная кроссплатформенность:** ядро на чистом Python 3 без внешних зависимостей. Работает без необходимости ставить `rsync`, MSYS2 или Cygwin. Включает готовые лаунчеры для bash (`sync.sh`) и Windows (`sync.cmd`).
 * ☁️ **Два провайдера синхронизации:**
   * **Git:** приватные репозитории на GitHub, GitLab или любом Git-сервере.

@@ -1,0 +1,11 @@
+{
+  "name": "antigravity-sync",
+  "displayName": "Antigravity Sync (Cross-Platform)",
+  "description": "Кроссплатформенная синхронизация настроек, правил, навыков, MCP-серверов, артефактов и проектов через Git и Google Drive на macOS, Linux и Windows.",
+  "version": "1.2.0",
+  "suggestedPrompts": [
+    "Синхронизируй с Google Drive",
+    "Синхронизируй с Git",
+    "Добавь текущий проект в синхронизацию"
+  ]
+}

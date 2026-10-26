@@ -378,6 +378,162 @@ def heal_workspace_uris(db_path: Path):
         print(f"[Warn] Ошибка адаптации путей рабочих папок: {e}")
 
 
+def get_os_key() -> str:
+    """Returns normalized OS key: 'windows', 'mac', or 'linux'."""
+    if SYSTEM_OS == "Windows":
+        return "windows"
+    elif SYSTEM_OS == "Darwin":
+        return "mac"
+    return "linux"
+
+
+def heal_mcp_config(mcp_config_path: Path = None):
+    """
+    Ensures mcp_config.json only registers MCP servers compatible with the current OS.
+    Incompatible servers (e.g. Windows exe paths on macOS, or uninstalled local HTTP services)
+    are safely moved to '_disabled_mcpServers' so Antigravity starts cleanly without error popups,
+    while preserving their configurations for synchronization back to compatible devices.
+    """
+    if mcp_config_path is None:
+        mcp_config_path = GEMINI_CONFIG / "mcp_config.json"
+    mcp_config_path = Path(mcp_config_path)
+    if not mcp_config_path.exists():
+        return
+
+    try:
+        with open(mcp_config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[Warn] Ошибка чтения mcp_config.json: {e}")
+        return
+
+    servers = data.setdefault("mcpServers", {})
+    disabled = data.setdefault("_disabled_mcpServers", {})
+
+    modified = False
+
+    # 1. Inspect active servers
+    to_disable = {}
+    for name, srv in list(servers.items()):
+        cmd = srv.get("command")
+        if cmd:
+            is_win_path = (len(cmd) >= 2 and cmd[1] == ":") or ("\\" in cmd) or cmd.lower().endswith(".exe")
+            is_unix_path = cmd.startswith("/") and not (len(cmd) >= 3 and cmd[2] == ":")
+
+            if SYSTEM_OS != "Windows" and is_win_path:
+                if not Path(cmd).exists():
+                    to_disable[name] = (srv, "Путь к исполняемому файлу Windows не найден в macOS/Linux")
+            elif SYSTEM_OS == "Windows" and is_unix_path:
+                if not Path(cmd).exists():
+                    to_disable[name] = (srv, "Unix-путь не поддерживается в Windows")
+
+        url = srv.get("url") or srv.get("serverUrl")
+        if url:
+            if "127.0.0.1:3845" in url or "localhost:3845" in url:
+                if SYSTEM_OS == "Darwin":
+                    figma_exists = Path("/Applications/Figma.app").exists() or (HOME / "Applications/Figma.app").exists()
+                    if not figma_exists:
+                        to_disable[name] = (srv, "Приложение Figma Desktop не установлено на данном Mac")
+                elif SYSTEM_OS == "Linux":
+                    to_disable[name] = (srv, "Figma Desktop недоступна на Linux")
+
+    for name, (srv, reason) in to_disable.items():
+        srv_copy = dict(srv)
+        srv_copy["_disabled_reason"] = reason
+        disabled[name] = srv_copy
+        del servers[name]
+        modified = True
+        print(f"[Antigravity Sync] MCP сервер '{name}' временно отключен на {SYSTEM_OS} ({reason}).")
+
+    # 2. Check if any disabled servers can be re-enabled on this OS
+    to_enable = {}
+    for name, srv in list(disabled.items()):
+        srv_clean = {k: v for k, v in srv.items() if not k.startswith("_disabled")}
+        cmd = srv_clean.get("command")
+        if cmd:
+            is_win_path = (len(cmd) >= 2 and cmd[1] == ":") or ("\\" in cmd) or cmd.lower().endswith(".exe")
+            if SYSTEM_OS == "Windows" and is_win_path and Path(cmd).exists():
+                to_enable[name] = srv_clean
+            elif SYSTEM_OS != "Windows" and not is_win_path:
+                if Path(cmd).exists() or shutil.which(cmd):
+                    to_enable[name] = srv_clean
+
+        url = srv_clean.get("url") or srv_clean.get("serverUrl")
+        if url and ("127.0.0.1:3845" in url or "localhost:3845" in url):
+            if SYSTEM_OS == "Windows":
+                figma_win = HOME / "AppData" / "Local" / "Figma"
+                if figma_win.exists():
+                    to_enable[name] = srv_clean
+            elif SYSTEM_OS == "Darwin":
+                if Path("/Applications/Figma.app").exists():
+                    to_enable[name] = srv_clean
+
+    for name, srv in to_enable.items():
+        servers[name] = srv
+        del disabled[name]
+        modified = True
+        print(f"[Antigravity Sync] MCP сервер '{name}' активирован для {SYSTEM_OS}.")
+
+    if modified:
+        atomic_write_json(mcp_config_path, data)
+
+
+def handle_mcp_config_push(local_config_dir: Path, target_config_dir: Path):
+    """
+    Saves OS-specific MCP configuration snapshot and preserves all servers in the target repository.
+    """
+    local_mcp = local_config_dir / "mcp_config.json"
+    if not local_mcp.exists():
+        return
+
+    os_key = get_os_key()
+    target_config_dir.mkdir(parents=True, exist_ok=True)
+    target_os_mcp = target_config_dir / f"mcp_config.{os_key}.json"
+    shutil.copy2(local_mcp, target_os_mcp)
+
+    target_mcp = target_config_dir / "mcp_config.json"
+    if target_mcp.exists():
+        try:
+            with open(target_mcp, "r", encoding="utf-8") as f:
+                target_data = json.load(f)
+            with open(local_mcp, "r", encoding="utf-8") as f:
+                local_data = json.load(f)
+
+            t_servers = target_data.setdefault("mcpServers", {})
+            t_disabled = target_data.setdefault("_disabled_mcpServers", {})
+            l_servers = local_data.get("mcpServers", {})
+            l_disabled = local_data.get("_disabled_mcpServers", {})
+
+            for k, v in l_servers.items():
+                t_servers[k] = v
+                if k in t_disabled:
+                    del t_disabled[k]
+
+            for k, v in l_disabled.items():
+                if k not in t_servers:
+                    t_disabled[k] = v
+
+            atomic_write_json(target_mcp, target_data)
+        except Exception as e:
+            print(f"[Warn] Ошибка объединения target mcp_config.json: {e}")
+
+
+def handle_mcp_config_pull(target_config_dir: Path, local_config_dir: Path):
+    """
+    Restores MCP configuration tailored for the current OS.
+    """
+    os_key = get_os_key()
+    target_os_mcp = target_config_dir / f"mcp_config.{os_key}.json"
+    local_mcp = local_config_dir / "mcp_config.json"
+
+    if target_os_mcp.exists():
+        shutil.copy2(target_os_mcp, local_mcp)
+    elif (target_config_dir / "mcp_config.json").exists():
+        shutil.copy2(target_config_dir / "mcp_config.json", local_mcp)
+
+    heal_mcp_config(local_mcp)
+
+
 # ----------------------------------------------------
 # Pure-Python Cross-Platform File Synchronizer
 # ----------------------------------------------------
@@ -466,6 +622,7 @@ def copy_all_to_target(target_dir: Path):
     if GEMINI_CONFIG.exists():
         dst = target_dir / "config"
         sync_tree(GEMINI_CONFIG, dst, CONFIG_EXCLUDES, delete=True)
+        handle_mcp_config_push(GEMINI_CONFIG, dst)
 
     # 2. Conversation Trajectories & Messages
     if GEMINI_CONVERSATIONS.exists():
@@ -547,6 +704,7 @@ def restore_all_from_target(target_dir: Path):
     if src.exists():
         GEMINI_CONFIG.mkdir(parents=True, exist_ok=True)
         ok, cnt, err = sync_tree(src, GEMINI_CONFIG, CONFIG_EXCLUDES, delete=False)
+        handle_mcp_config_pull(src, GEMINI_CONFIG)
         if ok:
             print("[Antigravity Sync] Конфигурация успешно восстановлена.")
         else:
@@ -1211,7 +1369,11 @@ def main():
         git_status()
     elif cmd in ("heal", "fix-paths"):
         heal_workspace_uris(GEMINI_ANTIGRAVITY / "conversation_summaries.db")
-        print("[Antigravity Sync] Пути ко всем рабочим папкам проверены и исправлены.")
+        heal_mcp_config(GEMINI_CONFIG / "mcp_config.json")
+        print("[Antigravity Sync] Пути ко всем рабочим папкам и конфигурация MCP проверены и исправлены.")
+    elif cmd in ("heal-mcp", "fix-mcp"):
+        heal_mcp_config(GEMINI_CONFIG / "mcp_config.json")
+        print("[Antigravity Sync] Конфигурация MCP проверена и адаптирована под текущую ОС.")
     elif cmd == "push":
         msg = sys.argv[2] if len(sys.argv) > 2 else None
         git_push(msg)

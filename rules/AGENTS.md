@@ -24,7 +24,36 @@ The plugin automatically captures and synchronizes full conversation trajectorie
 
 ---
 
-## 2. Project Management via Chat
+## 2. Conversation Conflict Resolution (Multi-Device History Divergence)
+
+When a user writes in the same chat from different devices, histories can diverge. The plugin detects divergence at the exact step level without data loss.
+
+### Checking Conflicts:
+- **Triggers**: "есть конфликты?", "покажи конфликты чатов", "список конфликтов", "conflict list"
+- **Action**: Run `~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict list`
+
+### Resolving a Conflict:
+- **Options**:
+  - `merge`: Combines both histories sequentially without losing any messages or steps from either device.
+  - `fork`: Preserves both histories as separate chats in the Antigravity sidebar (creates `[Ветка с другого ПК] <Название>`).
+  - `local`: Keeps the version from the current device and archives remote version in `backups/`.
+  - `remote`: Accepts the version from the other device and archives local version in `backups/`.
+- **Triggers**: "объедини диалоги", "совмести истории", "оставь локальный чат", "возьми версию с другого ПК", "разветви диалог", "разреши конфликт"
+- **Action**: Run:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict resolve "<conversation_id|all>" "<merge|fork|local|remote>"
+  ```
+
+### Setting Conflict Strategy:
+- **Triggers**: "автоматически объединяй конфликты", "всегда спрашивай о конфликтах", "стратегия конфликтов"
+- **Action**: Run:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict strategy "<prompt|merge|fork|local|remote>"
+  ```
+
+---
+
+## 3. Project Management via Chat
 
 Users can choose individual target directories for each project. When the user asks to add, relocate, or configure projects in synchronization:
 
@@ -55,10 +84,10 @@ Users can choose individual target directories for each project. When the user a
   ```
 
 ### Setting Default Directory for All Projects:
-- **Triggers**: "сохраняй проекты по умолчанию в ~/MyProjects", "измени стандартную папку для проектов"
+- **Triggers**: "сохраняй проекты по умолчанию в ~/MyProjects", "измени стандартную папку для проектов", "путь к проектам на Windows D:\Projects"
 - **Action**: Run:
   ```bash
-  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project default-dir "<new_default_directory>"
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config default-dir "<new_directory>" "[optional_os: windows|mac|linux]"
   ```
 
 ### Listing Projects:

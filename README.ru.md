@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-yellow.svg)]()
 [![Antigravity](https://img.shields.io/badge/Google%20Antigravity-2.0-blue.svg)]()
-[![Version](https://img.shields.io/badge/Version-1.4.0-orange.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.5.0-orange.svg)]()
 
 *Кроссплатформенный плагин резервного копирования и синхронизации для Google Antigravity (Git & Google Drive). Непрерывность диалогов с моделями, сохранение контекста, настроек и проектов с выбором индивидуальных папок.*
 
@@ -26,9 +26,11 @@
 
 ## Ключевые возможности
 * 💬 **Продолжение диалогов на любом компьютере:** автоматический захват и перенос всей траектории переписки (`conversations/*.db`), степов выполнения, артефактов и транскриптов (`transcript.jsonl`). Пересаживайтесь за другой ноутбук или ПК и продолжайте разговор с агентом с того же места!
+* 🔀 **Умное разрешение конфликтов диалогов:** если вы общались в одном чате с разных устройств, плагин пошагово определит расхождение и предложит объединить обе истории (Merge), разветвить в два отдельных чата (Fork) или оставить нужную версию (Local/Remote).
 * 🗄️ **Надёжный бэкап и слияние SQLite:** использование штатного API `sqlite3.backup()` позволяет создавать снимки баз данных «на лету» без блокировок и потери несохранённых данных из WAL-файлов. История диалогов с разных устройств объединяется без перезаписи.
-* 📁 **Индивидуальные папки для каждого проекта:** возможность выбирать, куда именно восстанавливать или сохранять каждый проект. Проекты могут жить в совершенно разных папках на разных компьютерах (`project set-path`, `project set-target`, `project default-dir`).
-* 🩹 **Автоматическое исправление путей рабочих папок:** сопоставляет и перелинковывает пути из других ОС (например, диски Windows `C:\` на macOS), предотвращая ошибки «Пропавшая папка» (Missing folder) при открытии синхронизированных диалогов и привязывая чаты к выбранной пользователем папке.
+* 📁 **Индивидуальные папки для каждого проекта:** возможность выбирать, куда именно восстанавливать или сохранять каждый проект. Проекты могут жить в совершенно разных папках на разных компьютерах (`project set-path`, `project set-target`, `config default-dir`).
+* 🩹 **Автоматическое исправление путей проектов и Antigravity IDE:** сопоставляет и перелинковывает пути из других ОС (например, диски Windows `C:\` на macOS) в истории диалогов и в файлах проектов IDE (`~/.gemini/config/projects/*.json`), полностью устраняя предупреждения «Пропавшая папка» (Missing folder).
+* 🔌 **Кроссплатформенная изоляция MCP-серверов:** автоматически выявляет несовместимые команды MCP (например, `.exe` файлы Windows на macOS) и изолирует их в `_disabled_mcpServers`, сохраняя для целевых ПК и избавляя от всплывающих ошибок при старте.
 * 🌐 **Полная кроссплатформенность:** ядро на чистом Python 3 без сторонних зависимостей. Работает без `rsync`, MSYS2 или Cygwin. Включает готовые лаунчеры для bash (`sync.sh`) и Windows (`sync.cmd`).
 * ☁️ **Два провайдера синхронизации:**
   * **Git:** приватные репозитории на GitHub, GitLab или любом Git-сервере.
@@ -95,8 +97,19 @@
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project add /путь/к/проекту [имя] [/целевая/папка]
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-path "имя-проекта" /новый/путь
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-target "имя-проекта" windows "C:\work\app"
-~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project default-dir ~/MyProjects
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project list
+
+# Разрешение конфликтов чатов (при одновременной переписке с разных ПК)
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict list
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict resolve <id|all> merge
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict resolve <id|all> fork
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict strategy prompt
+
+# Настройки плагина и стандартные папки для ОС
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config show
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config default-dir ~/MyProjects mac
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config default-dir "D:\Projects" windows
+~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh heal
 
 # Синхронизация всех источников
 ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh all push
@@ -116,6 +129,12 @@ rem Управление проектами и выбор индивидуаль
 %USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project add C:\dev\project [имя] [C:\целевая\папка]
 %USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project set-path "имя-проекта" D:\Projects\app
 %USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project set-target "имя-проекта" mac "/Users/name/Projects/app"
-%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project default-dir D:\Projects
 %USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd project list
+
+rem Разрешение конфликтов и настройки
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd conflict list
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd conflict resolve all merge
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd config show
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd config default-dir D:\Projects windows
+%USERPROFILE%\.gemini\config\plugins\antigravity-sync\scripts\sync.cmd heal
 ```

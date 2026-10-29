@@ -30,7 +30,29 @@ When pulled on another device, the user can open any past conversation from the 
 
 ---
 
-### 2. Adding & Managing Projects in Sync (Custom Per-Project Folders)
+### 2. Resolving Multi-Device Chat Conflicts
+
+When a user chats with the AI on multiple devices between syncs, the conversation histories may diverge. The plugin detects this at the step level:
+- **List Conflicts**:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict list
+  ```
+- **Resolve Conflict**:
+  - `merge`: Combines both histories into one continuous conversation (steps from the other device are re-indexed and appended after local steps with an ephemeral separator).
+  - `fork`: Branches the conversation into a separate chat in the Antigravity sidebar titled `[Ветка с другого ПК] <Название>`, keeping both full histories available.
+  - `local`: Keeps the local version intact and moves the remote copy to `backups/`.
+  - `remote`: Adopts the remote version and moves the previous local copy to `backups/`.
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict resolve "<conversation_id|all>" "<merge|fork|local|remote>"
+  ```
+- **Conflict Strategy**:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh conflict strategy "<prompt|merge|fork|local|remote>"
+  ```
+
+---
+
+### 3. Adding & Managing Projects in Sync (Custom Per-Project Folders)
 The user can add arbitrary projects to the synchronization pool and choose individual target folders for each project.
 
 - **Add Project** (with optional custom destination folder):
@@ -53,9 +75,16 @@ The user can add arbitrary projects to the synchronization pool and choose indiv
   ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project set-target "<project_name>" "<windows|mac|linux|default>" "<target_path>"
   ```
 
-- **Set Global Default Folder for Projects**:
+- **Set OS-Specific / Global Default Folder for Projects**:
   ```bash
-  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh project default-dir "[new_default_directory]"
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config default-dir "<new_directory>" "[optional_os: windows|mac|linux]"
+  ```
+
+- **View & Edit Plugin Settings**:
+  ```bash
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config show
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh config set <key> <val>
+  ~/.gemini/config/plugins/antigravity-sync/scripts/sync.sh heal
   ```
 
 - **List Synced Projects**:
